@@ -3,10 +3,10 @@ ETL das corridas de taxi amarelo de Nova York (2022) para o PostgreSQL.
 
 Fluxo:
     create_raw_table -> list_source_files -> load_raw (1 task por arquivo)
-    -> build_trusted -> check_trusted -> build_refined
+    -> build_trusted -> check_trusted -> build_refined -> answer_questions
 
 Camadas (schemas no banco nyc_taxi):
-    raw      copia dos arquivos parquet, particionada por arquivo de origem
+    raw      copia fiel dos arquivos parquet, particionada por arquivo de origem
     trusted  dados tipados, padronizados e filtrados por regras de qualidade
     refined  tabela final para analise, com colunas derivadas e indices
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -28,10 +29,11 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 POSTGRES_CONN_ID = "nyc_taxi_dw"
 DATA_DIR = Path(os.getenv("NYC_TLC_DATA_DIR", "/opt/airflow/data"))
+QUERIES_DIR = Path(os.getenv("NYC_TLC_QUERIES_DIR", "/opt/airflow/queries"))
 FILE_PATTERN = "yellow_tripdata_2022-*.parquet*"
 BATCH_SIZE = 250_000
 
-# Colunas na ordem da tabela raw.yellow_tripdata.
+# Colunas na ordem da tabela raw.yellow_tripdata
 RAW_COLUMNS = [
     "vendorid",
     "tpep_pickup_datetime",
@@ -147,7 +149,7 @@ def nyc_taxi_etl():
         raw_count = hook.get_first("SELECT COUNT(*) FROM raw.yellow_tripdata")[0]
         trusted_count = hook.get_first("SELECT COUNT(*) FROM trusted.yellow_tripdata")[0]
         if trusted_count == 0:
-            raise ValueError("A camada trusted está vazia")
+            raise ValueError("Camada trusted vazia")
         removed = raw_count - trusted_count
         log.info(
             "raw: %d | trusted: %d | removidos pelas regras de qualidade: %d (%.2f%%)",
@@ -163,9 +165,21 @@ def nyc_taxi_etl():
         sql="sql/refined_build.sql",
     )
 
+    @task
+    def answer_questions() -> None:
+        """Executa as queries das perguntas do desafio e registra as respostas no log."""
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        with closing(hook.get_conn()) as conn:
+            for query_file in sorted(QUERIES_DIR.glob("*.sql")):
+                with conn.cursor() as cur:
+                    cur.execute(query_file.read_text())
+                    columns = [col.name for col in cur.description]
+                    rows = cur.fetchall()
+                log.info("%s -> %s", query_file.name, [dict(zip(columns, row)) for row in rows])
+
     loaded = load_raw.expand(file_path=list_source_files())
     create_raw_table >> loaded
-    loaded >> build_trusted >> check_trusted() >> build_refined
+    loaded >> build_trusted >> check_trusted() >> build_refined >> answer_questions()
 
 
 nyc_taxi_etl()

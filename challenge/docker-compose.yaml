@@ -18,9 +18,10 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     AIRFLOW_CONN_NYC_TAXI_DW: postgresql://${DW_USER:-nyc}:${DW_PASSWORD:-nyc}@postgres-dw:5432/${DW_DB:-nyc_taxi} # conexao
-    NYC_TLC_DATA_DIR: /opt/airflow/data # diretorio
+    NYC_TLC_DATA_DIR: /opt/airflow/data # diretorio com os arquivos parquet
   volumes:
     - ./dags:/opt/airflow/dags
+    - ./queries:/opt/airflow/queries
     - ./logs:/opt/airflow/logs
     - ../nyc-tlc-data:/opt/airflow/data:ro
   user: "${AIRFLOW_UID:-50000}:0"
@@ -52,6 +53,7 @@ services:
       POSTGRES_USER: ${DW_USER:-nyc}
       POSTGRES_PASSWORD: ${DW_PASSWORD:-nyc}
       POSTGRES_DB: ${DW_DB:-nyc_taxi}
+    # Ajustes para cargas grandes (~40 Mi de linhas). Com wal_level=minimal.
     command:
       - postgres
       - -c
