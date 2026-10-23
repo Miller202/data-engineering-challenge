@@ -3,9 +3,12 @@ ETL das corridas de taxi amarelo de Nova York (2022) para o PostgreSQL.
 
 Fluxo:
     create_raw_table -> list_source_files -> load_raw (1 task por arquivo)
+    -> build_trusted -> check_trusted -> build_refined
 
 Camadas (schemas no banco nyc_taxi):
     raw      copia dos arquivos parquet, particionada por arquivo de origem
+    trusted  dados tipados, padronizados e filtrados por regras de qualidade
+    refined  tabela final para analise, com colunas derivadas e indices
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ DATA_DIR = Path(os.getenv("NYC_TLC_DATA_DIR", "/opt/airflow/data"))
 FILE_PATTERN = "yellow_tripdata_2022-*.parquet*"
 BATCH_SIZE = 250_000
 
-# Colunas na ordem da tabela raw.yellow_tripdata
+# Colunas na ordem da tabela raw.yellow_tripdata.
 RAW_COLUMNS = [
     "vendorid",
     "tpep_pickup_datetime",
@@ -61,7 +64,7 @@ def partition_name(file_name: str) -> str:
 
 @dag(
     dag_id="nyc_taxi_etl",
-    description="ETL das corridas de taxi de NY (2022): carga da camada raw",
+    description="ETL das corridas de taxi de NY (2022): raw -> trusted -> refined",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
@@ -131,8 +134,38 @@ def nyc_taxi_etl():
         log.info("%s: %d linhas carregadas em raw.%s", file_name, total, partition)
         return total
 
+    build_trusted = SQLExecuteQueryOperator(
+        task_id="build_trusted",
+        conn_id=POSTGRES_CONN_ID,
+        sql="sql/trusted_build.sql",
+    )
+
+    @task
+    def check_trusted() -> None:
+        """Compara os volumes das camadas e falha se a trusted estiver vazia."""
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        raw_count = hook.get_first("SELECT COUNT(*) FROM raw.yellow_tripdata")[0]
+        trusted_count = hook.get_first("SELECT COUNT(*) FROM trusted.yellow_tripdata")[0]
+        if trusted_count == 0:
+            raise ValueError("A camada trusted está vazia")
+        removed = raw_count - trusted_count
+        log.info(
+            "raw: %d | trusted: %d | removidos pelas regras de qualidade: %d (%.2f%%)",
+            raw_count,
+            trusted_count,
+            removed,
+            100 * removed / raw_count,
+        )
+
+    build_refined = SQLExecuteQueryOperator(
+        task_id="build_refined",
+        conn_id=POSTGRES_CONN_ID,
+        sql="sql/refined_build.sql",
+    )
+
     loaded = load_raw.expand(file_path=list_source_files())
     create_raw_table >> loaded
+    loaded >> build_trusted >> check_trusted() >> build_refined
 
 
 nyc_taxi_etl()
