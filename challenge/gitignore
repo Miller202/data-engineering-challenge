@@ -1,0 +1,3 @@
+# Logs do Airflow e variáveis locais
+logs/
+.env
